@@ -16,14 +16,40 @@
 
 #include "flash_fs.h"
 #include "user_interface.h"
+#include "user_exceptions.h"
+#include "user_modules.h"
 
 #include "ets_sys.h"
 #include "driver/uart.h"
 #include "mem.h"
 
+#ifdef LUA_USE_MODULES_RTCTIME
+#include "rtc/rtctime.h"
+#endif
+
 #define SIG_LUA 0
+#define SIG_UARTINPUT 1
 #define TASK_QUEUE_LEN 4
 os_event_t *taskQueue;
+
+
+/* Note: the trampoline *must* be explicitly put into the .text segment, since
+ * by the time it is invoked the irom has not yet been mapped. This naturally
+ * also goes for anything the trampoline itself calls.
+ */
+void TEXT_SECTION_ATTR user_start_trampoline (void)
+{
+   __real__xtos_set_exception_handler (
+     EXCCAUSE_LOAD_STORE_ERROR, load_non_32_wide_handler);
+
+#ifdef LUA_USE_MODULES_RTCTIME
+  // Note: Keep this as close to call_user_start() as possible, since it
+  // is where the cpu clock actually gets bumped to 80MHz.
+  rtctime_early_startup ();
+#endif
+  call_user_start ();
+}
+
 
 void task_lua(os_event_t *e){
     char* lua_argv[] = { (char *)"lua", (char *)"-i", NULL };
@@ -32,6 +58,12 @@ void task_lua(os_event_t *e){
         case SIG_LUA:
             NODE_DBG("SIG_LUA received.\n");
             lua_main( 2, lua_argv );
+            break;
+        case SIG_UARTINPUT:
+            lua_handle_input (false);
+            break;
+        case LUA_PROCESS_LINE_SIG:
+            lua_handle_input (true);
             break;
         default:
             break;
@@ -51,7 +83,7 @@ void task_init(void){
 void nodemcu_init(void)
 {
     NODE_ERR("\n");
-    // Initialize platform first for lua modules.   
+    // Initialize platform first for lua modules.
     if( platform_init() != PLATFORM_OK )
     {
         // This should never happen
@@ -85,7 +117,7 @@ void nodemcu_init(void)
         // Flash init data at FLASHSIZE - 0x04000 Byte.
         flash_init_data_default();
         // Flash blank data at FLASHSIZE - 0x02000 Byte.
-        flash_init_data_blank(); 
+        flash_init_data_blank();
     }
 
 #if defined( BUILD_WOFS )
@@ -114,7 +146,7 @@ void nodemcu_init(void)
     // lua_main( 3, lua_argv );
     // NODE_DBG("Flash sec num: 0x%x\n", flash_get_sec_num());
     task_init();
-    system_os_post(USER_TASK_PRIO_0,SIG_LUA,'s');
+    system_os_post(LUA_TASK_PRIO,SIG_LUA,'s');
 }
 
 /******************************************************************************
@@ -125,21 +157,21 @@ void nodemcu_init(void)
 *******************************************************************************/
 void user_init(void)
 {
+#ifdef LUA_USE_MODULES_RTCTIME
+    rtctime_late_startup ();
+#endif
     // NODE_DBG("SDK version:%s\n", system_get_sdk_version());
     // system_print_meminfo();
     // os_printf("Heap size::%d.\n",system_get_free_heap_size());
     // os_delay_us(50*1000);   // delay 50ms before init uart
 
-#ifdef DEVELOP_VERSION
-    uart_init(BIT_RATE_74880, BIT_RATE_74880);
-#else
-    uart_init(BIT_RATE_9600, BIT_RATE_9600);
-#endif
-    // uart_init(BIT_RATE_115200, BIT_RATE_115200);
-    
+    UartBautRate br = BIT_RATE_DEFAULT;
+
+    uart_init (br, br, USER_TASK_PRIO_0, SIG_UARTINPUT);
+
     #ifndef NODE_DEBUG
     system_set_os_print(0);
     #endif
-    
+
     system_init_done_cb(nodemcu_init);
 }
